@@ -1,0 +1,127 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------
+    // Helper functions
+    // -------------------------------------------------------
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return request.auth.uid == uid;
+    }
+
+    function validPriority(priority) {
+      return priority in ['low', 'medium', 'high'];
+    }
+
+    function validCategory(category) {
+      return category == null
+        || category in ['personal', 'work', 'study', 'health', 'other'];
+    }
+
+    function validTitle(title) {
+      return title is string
+        && title.size() > 0
+        && title.size() <= 200;
+    }
+
+    function validDescription(description) {
+      return description == null
+        || (description is string && description.size() <= 2000);
+    }
+
+    function validLabels(labels) {
+      return labels is list && labels.size() <= 20;
+    }
+
+    function validTaskFields() {
+      let data = request.resource.data;
+      return validTitle(data.title)
+        && validDescription(data.get('description', null))
+        && data.completed is bool
+        && validPriority(data.priority)
+        && validCategory(data.get('category', null))
+        && validLabels(data.get('labels', []))
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.ownerId == request.auth.uid;
+    }
+
+    function validUpdateFields() {
+      let data = request.resource.data;
+      let allowed = ['title', 'description', 'completed', 'priority',
+                     'dueDate', 'category', 'labels', 'updatedAt', 'completedAt'];
+      // Verify only allowed fields are written
+      return data.keys().hasOnly(
+               ['title', 'description', 'completed', 'priority',
+                'dueDate', 'category', 'labels', 'updatedAt', 'completedAt',
+                'ownerId', 'createdAt']
+             )
+        // Protected fields must not change
+        && data.ownerId == resource.data.ownerId
+        && data.createdAt == resource.data.createdAt
+        && data.updatedAt == request.time
+        // Field validations
+        && (data.keys().hasAny(['title']) ? validTitle(data.title) : true)
+        && (data.keys().hasAny(['description']) ? validDescription(data.description) : true)
+        && (data.keys().hasAny(['completed']) ? data.completed is bool : true)
+        && (data.keys().hasAny(['priority']) ? validPriority(data.priority) : true)
+        && (data.keys().hasAny(['category']) ? validCategory(data.category) : true)
+        && (data.keys().hasAny(['labels']) ? validLabels(data.labels) : true);
+    }
+
+    // -------------------------------------------------------
+    // User profiles: /users/{uid}
+    // -------------------------------------------------------
+    match /users/{uid} {
+      // Only the owner can read their own profile
+      allow read: if isAuthenticated() && isOwner(uid);
+
+      // Allow create only for the authenticated user's own document
+      allow create: if isAuthenticated()
+        && isOwner(uid)
+        && request.resource.data.email is string
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 1
+        && request.resource.data.displayName.size() <= 60;
+
+      // Allow update only by the owner; email must not change
+      allow update: if isAuthenticated()
+        && isOwner(uid)
+        && request.resource.data.email == resource.data.email;
+
+      // Disallow delete through client SDK
+      allow delete: if false;
+
+      // -------------------------------------------------------
+      // Tasks: /users/{uid}/tasks/{taskId}
+      // -------------------------------------------------------
+      match /tasks/{taskId} {
+        // Only the task owner can read
+        allow read: if isAuthenticated() && isOwner(uid);
+
+        // Only the owner can create; must pass full field validation
+        allow create: if isAuthenticated()
+          && isOwner(uid)
+          && validTaskFields();
+
+        // Only the owner can update; protected fields must be unchanged
+        allow update: if isAuthenticated()
+          && isOwner(uid)
+          && validUpdateFields();
+
+        // Only the owner can delete their own task
+        allow delete: if isAuthenticated() && isOwner(uid);
+      }
+    }
+
+    // Deny all other paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
